@@ -1,0 +1,493 @@
+---
+title: "The Game is Afoot & Poems of Mihai Eminescu"
+author: "Jessica Randall"
+date: "9/4/2020"
+output: html_document
+---
+
+This notebook follow's Julia Silge's topic modeling tutorial [video](https://youtu.be/evTuL-RcRpc)
+and [blog post](https://juliasilge.com/blog/sherlock-holmes-stm/) and expands on 
+it with an example of topic modeling using Mihai Eminescu's collection "Poems" in 
+the original Romanian. 
+
+Additional Resources:
+[Tidy Text Mining](https://www.tidytextmining.com/tidytext.html)
+[Supervised Machine Learning for Text Analysis in R](https://smltar.com)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load(
+  "tidymodels", "tidyverse", "gutenbergr",
+  "tidytext", "stringr", "stm", "quanteda", "reshape2",
+  "furrr", "ggthemes", "kableExtra", "styler"
+)
+
+sherlock_raw <- gutenberg_download(1661)
+```
+
+### Data prep {-} 
+
+```{r prep, message=FALSE, warning=FALSE}
+
+sherlock <- sherlock_raw %>%
+  mutate(story = ifelse(str_detect(text, "ADVENTURE"),
+    text,
+    NA
+  )) %>%
+  fill(story) %>%
+  filter(story != "THE ADVENTURES OF SHERLOCK HOLMES") %>%
+  mutate(story = factor(story, levels = unique(story)))
+
+tidy_sherlock <- sherlock %>%
+  mutate(line = row_number()) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(word != "holmes")
+
+tidy_sherlock %>%
+  count(word, sort = TRUE)
+```
+
+### Explore tf-idf {-}
+
+Which words are most important in each story?
+
+tf-idf: "identifies words that are important to a document in a collection of 
+documents; in this case."The statistic tf-idf is intended to measure how 
+important a word is to a document in a collection (or corpus) of documents, 
+for example, to one novel in a collection of novels or to one website in a 
+collection of websites.
+
+decreases the weight for commonly used words and increases the weight for words 
+that are not used very much in a collection of documents. This can be combined 
+with term frequency to calculate a term’s tf-idf (the two quantities 
+multiplied together), the frequency of a term adjusted for how rarely it is used."
+
+see : https://www.tidytextmining.com/tfidf.html
+
+```{r tf_idf, fig.height=7, fig.width=7}
+
+tidy_sherlock %>%
+  count(story, word, sort = TRUE) %>%
+  bind_tf_idf(word, story, n) %>%
+  group_by(story) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = story)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~story, scales = "free") +
+  coord_flip()
+```
+
+### Topic modeling implementation {-}
+
+Structural topic model, em algorithm, k will vary by document, 
+slightly computationally intensive
+
+on k :The most important user input in parametric topic models is the number of 
+topics. There is no right answer to the appropriate number of topics. More 
+topics will give more fine-grained representations of the data at the potential 
+cost of being less precisely estimated." - documentation for stm
+
+
+```{r quanteda, message=FALSE, echo=FALSE, warning=FALSE}
+
+sherlock_dfm <- tidy_sherlock %>%
+  count(story, word, sort = TRUE) %>%
+  cast_dfm(story, word, n)
+
+topic_mod <- stm(sherlock_dfm, K = 6, seed = 22310)
+```
+
+### Plot the beta and gamma matrices {-}
+
+-Which words contribute the most to each topic?
+-How much does each topic contribute to a given document?
+-How likely is this document to belong to this topic?
+
+```{r plot, fig.height=7, fig.width=7}
+
+td_beta <- tidy(topic_mod)
+
+td_beta %>%
+  group_by(topic) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = topic)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~topic, scales = "free") +
+  coord_flip() +
+  theme_few() +
+  scale_color_colorblind()
+
+td_gamma <- tidy(topic_mod,
+  matrix = "gamma",
+  document_names = rownames(sherlock_dfm)
+)
+
+
+td_gamma %>%
+  ggplot(aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(show.legend = TRUE) +
+  facet_wrap(~topic, ncol = 3) +
+  theme_gdocs() +
+  scale_fill_colorblind()
+```
+
+### Trying on my own with Mihai Eminescu's "Poems" {-}
+
+```{r load_jr}
+
+poezii_raw <- gutenberg_download(35323)
+```
+
+### Data prep {-} 
+
+- Only taking first half of poems of the raw corpus for better visualization
+- Removed editors note, table of contents, 
+- Used poem titles
+- Pulled out Romanian stopwords, the word "poems", notes, numbers
+
+```{r prep_jr, warning=FALSE, message=FALSE}
+
+poezii <- poezii_raw[151:12887, ] %>%
+  mutate(poem = ifelse(str_detect(text, "[:upper:]+$"), text, NA)) %>%
+  fill(poem) %>%
+  mutate(poem = factor(poem, levels = unique(poem)))
+
+stop_snow <- as.data.frame(stopwords("ro", source = "snowball")) %>%
+  rename(word = `stopwords("ro", source = "snowball")`)
+stop_nltk <- as.data.frame(stopwords("ro", source = "nltk")) %>%
+  rename(word = `stopwords("ro", source = "nltk")`)
+stop_iso <- as.data.frame(stopwords("ro", source = "stopwords-iso")) %>%
+  rename(word = `stopwords("ro", source = "stopwords-iso")`)
+numbers <- c(
+  "I", "	II", "III", "IV", "V", "VI",
+  "VII", "VIII", "11", "1652", "38", "5", "6", "9"
+)
+
+stopwords_ro <- left_join(stop_iso, stop_nltk, by = "word") %>%
+  left_join(stop_snow, by = "word")
+
+tidy_poezii <- poezii %>%
+  mutate(line = row_number()) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stopwords_ro) %>%
+  filter(word != "poezii") %>%
+  filter(!word %in% numbers) %>%
+  filter(!poem %in% numbers) %>%
+  filter(poem != "NOTE")
+
+tidy_poezii %>%
+  count(word, sort = TRUE)
+
+```
+
+"Eyes", World", "Sweet", and "Life" top the list of most frequently occuring words,
+sounds like poetry!
+
+### Explore tf-idf {-}
+
+Which words are most important?
+
+```{r tf_idf_jr, fig.height=10, fig.width=10, message=FALSE}
+
+poezii_tf_idf <- tidy_poezii %>%
+  count(poem, word, sort = TRUE) %>%
+  arrange(poem, word, n) %>%
+  slice(1:2583) %>%
+  bind_tf_idf(word, poem, n) %>%
+  group_by(poem) %>%
+  top_n(5) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, tf_idf))
+
+poezii_tf_idf %>%
+  ggplot(aes(word, tf_idf, fill = poem)) +
+  geom_col(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~poem, scales = "free", ncol = 3) +
+  coord_flip() +
+  theme(strip.text = element_text(size = 11)) +
+  labs(
+    x = NULL, y = "tf-idf",
+    title = "Highest tf-idf words in 15 of Mihai Eminescu's Poems",
+    subtitle = "Individual poems focus on different themes and visual metaphors"
+  ) +
+  theme_few()
+```
+
+"The Grave of Aron Pumunul" lists the 5 most important words as "whispers", 
+"whispering", "extinguished", "follow", "field". 
+
+"A Ride at Dawn" lists the 5 most important words as "kiss", "gentle", "thin", 
+"cleave", and "wash". 
+
+"From Abroad" lists the 5 most important words as "date", "whispered", "native", 
+"groan", and "clouds".
+
+"In Bucovina" lists the 5 most important words as "Bucovina", "step", "hum", 
+"tremble", and "pass".
+
+"The Hope" lists the 5 most important words as "hope" "I want", "love", 
+"dearest", and "you want".
+
+"The Mysteries of the Night" lists the 5 most important words as "many", 
+"gentle"(diminutive), "sighing", "Cantu", and "two". 
+
+"What I Wish From You, Beloved Romania" lists the 5 most important words as 
+"Romania" "I wish", "for you", "glory", and "strength". 
+
+"The Heliad" lists the 5 most important words as "garland", "sylphs", "heliads", 
+"cloud", and "curls".
+
+"The Artist" lists the 5 most important words as "take", part of the word
+"coming true", "embodied", "flower", and "deify".
+
+"The Love of a Marble" lists the 5 most important words as "I love" "your", 
+"ocean", "love", and "tell".
+
+"Junii Corupti"* lists the 5 most important words as "forget", "dry", "death" 
+or "dying", "arise", and "strength". 
+
+"At the Death of Prince Stirbey" lists the 5 most important words as "move", 
+"Stirbey", "light", "to see", and "hearts". 
+
+"Venus and Madonna" lists the 5 most important words as "women", "lost",
+"Madonna", "saw", and "demon". 
+
+"The Epigones" lists the 5 most important words as "gold", "holy", "all", 
+"sense", and "death". 
+
+"Guardian Angel" lists the 5 most important words as "across", "you are", 
+"eyelashes", "keep watch", and "guard". 
+
+*the best translation of this title I can think of would be something like 
+"The Corrupted" but this loses the fact that he's speaking specifically about 
+young people, suggestions appreciated!
+
+### Topic modeling implementation {-}
+
+*set up our dfm*
+
+```{r quanteda_jr, message=FALSE, echo=FALSE, warning=FALSE}
+
+poezii_dfm <- tidy_poezii %>%
+  count(poem, word, sort = TRUE) %>%
+  cast_dfm(poem, word, n)
+```
+
+*evaluate which k is the best fit for this corpus*
+
+Julia knew that a k of 6 was a good choice for her data but since I don't know 
+what would be the best fit for this data, let's find out.
+
+This section adapted from Julia's post ["Training, evaluating, and interpreting 
+topic models"](https://juliasilge.com/blog/evaluating-stm/)
+
+```{r choosing_k, message=FALSE, echo=FALSE}
+
+plan(multiprocess)
+
+multi_mods <- tibble(K = c(12, 14, 15, 16, 17, 18)) %>%
+  mutate(topic_model = future_map(K, ~ stm(poezii_dfm,
+    K = .,
+    verbose = FALSE,
+    seed = 22310
+  )))
+
+heldout <- make.heldout(poezii_dfm)
+
+k_result <- multi_mods %>%
+  mutate(
+    exclusivity = map(topic_model, exclusivity),
+    semantic_coherence = map(topic_model, semanticCoherence, poezii_dfm),
+    eval_heldout = map(topic_model, eval.heldout, heldout$missing),
+    residual = map(topic_model, checkResiduals, poezii_dfm),
+    bound = map_dbl(topic_model, function(x) max(x$convergence$bound)),
+    lfact = map_dbl(topic_model, function(x) lfactorial(x$settings$dim$K)),
+    lbound = bound + lfact,
+    iterations = map_dbl(topic_model, function(x) length(x$convergence$bound))
+  )
+```
+
+### Visualize fit metrics {-}
+
+```{r viz_assessment, echo=FALSE, message=FALSE, warning=FALSE}
+
+k_result %>%
+  transmute(K,
+    `Lower bound` = lbound,
+    Residuals = map_dbl(residual, "dispersion"),
+    `Semantic coherence` = map_dbl(semantic_coherence, mean),
+    `Held-out likelihood` = map_dbl(eval_heldout, "expected.heldout")
+  ) %>%
+  gather(Metric, Value, -K) %>%
+  ggplot(aes(K, Value, color = Metric)) +
+  geom_line(size = 1.5, alpha = 0.7, show.legend = FALSE) +
+  facet_wrap(~Metric, scales = "free_y") +
+  labs(
+    x = "K (number of topics)",
+    y = NULL,
+    title = "Model diagnostics by number of topics",
+    subtitle = "These diagnostics indicate that a good number of topics 
+       would be around X"
+  ) +
+  theme_gdocs() +
+  scale_color_colorblind()
+
+k_result %>%
+  select(K, exclusivity, semantic_coherence) %>%
+  filter(K %in% c(12, 14, 15, 16, 17, 18)) %>%
+  unnest(cols = c(exclusivity, semantic_coherence)) %>%
+  mutate(K = as.factor(K)) %>%
+  ggplot(aes(semantic_coherence, exclusivity, color = K)) +
+  geom_point(size = 2, alpha = 0.7) +
+  labs(
+    x = "Semantic coherence",
+    y = "Exclusivity",
+    title = "Comparing exclusivity and semantic coherence",
+    subtitle = "Models with fewer topics have higher semantic coherence 
+       for more topics, but lower exclusivity"
+  ) +
+  theme_gdocs() +
+  scale_color_colorblind()
+```
+
+The held-out likelihood is the highest at 14 topics and the residuals are
+lowest around 14. Coherence also peaks at 14 so it seems like 14 topics would be
+the best fit for this data. Looking more closely at coherence we see that the 
+ks of 14 have the highest exclusivity and highest coherence. I'll choose 14 for 
+this analysis.
+
+### Plot results {-}
+
+*Beta*
+
+```{r plotbeta, fig.height=12, fig.width=12}
+
+poezii_mod <- k_result %>%
+  filter(K == 14) %>%
+  pull(topic_model) %>%
+  .[[1]]
+
+td_beta_p <- tidy(poezii_mod)
+
+td_beta_p %>%
+  group_by(topic) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = topic)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(
+    x = NULL, y = expression(beta),
+    title = "Highest word probabilities for each topic",
+    subtitle = "Different words are associated with different topics"
+  ) +
+  theme_few() +
+  scale_color_colorblind()
+```
+Many of the topics have overlapping words like "sweet", "stars", "gold", "moon",
+"eyes", "world", "your", "life", "light" etc... again, sounds like poetry!
+
+*Gamma*
+
+```{r plotgamma, fig.height=7, fig.width=7, warning=FALSE, message=FALSE}
+
+td_gamma_p <- tidy(poezii_mod,
+  matrix = "gamma",
+  document_names = rownames(poezii_dfm)
+)
+
+td_gamma_p %>%
+  ggplot(aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(show.legend = TRUE) +
+  facet_wrap(~topic, ncol = 3) +
+  labs(
+    title = "Distribution of document probabilities for each topic",
+    subtitle = "Each topic is associated with 1-22 stories",
+    y = "Number of poems", x = expression(gamma)
+  ) +
+  theme_gdocs() +
+  scale_color_colorblind()
+
+top_terms <- td_beta_p %>%
+  arrange(beta) %>%
+  group_by(topic) %>%
+  top_n(7, beta) %>%
+  arrange(-beta) %>%
+  select(topic, term) %>%
+  summarise(terms = list(term), .groups = "keep") %>%
+  mutate(terms = map(terms, paste, collapse = ", ")) %>%
+  unnest(cols = c(topic, terms))
+
+gamma_terms <- td_gamma_p %>%
+  group_by(topic) %>%
+  summarise(gamma = mean(gamma), .groups = "keep") %>%
+  arrange(desc(gamma)) %>%
+  left_join(top_terms, by = "topic") %>%
+  mutate(
+    topic = paste0("Topic ", topic),
+    topic = reorder(topic, gamma)
+  )
+
+gamma_terms %>%
+  top_n(7, gamma) %>%
+  ggplot(aes(topic, gamma, label = terms, fill = topic)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(hjust = 0, nudge_y = 0.0005, size = 3) +
+  coord_flip() +
+  scale_y_continuous(
+    expand = c(0, 0),
+    limits = c(0, 0.2),
+    labels = percent_format()
+  ) +
+  labs(
+    x = NULL, y = expression(gamma),
+    title = "7 topics by prevalence in the Poems corpus",
+    subtitle = "With the top words that contribute to each topic"
+  ) +
+  theme_few() +
+  scale_color_colorblind() +
+  theme(
+    plot.title = element_text(size = 14),
+    plot.subtitle = element_text(size = 12))
+
+gamma_terms %>%
+  select(topic, gamma, terms) %>%
+  kable(
+    digits = 3,
+    col.names = c("Topic", "Expected topic proportion", "Top 7 terms")
+  )
+
+```
+
+
+Topics 6 and 13 share the words "eyes" and "sweet" but 6 focuses more on 
+the subject of the poem and uses words like "you are", "your", and "mouth" while
+13 has more physical words like "hand", "heart/soul", "life" but also "light, 
+"shadow", and "country".
+
+Topic 8 includes words related to night time like "moon", "stars", and "silver".
+
+Many of the topics seem to have grouped words which end in similar ways.
+Romanian uses word endings to denote concepts like ownership "my", "your", 
+"ours", plurality similar to the English ending "-s", or articles like "a" or 
+"the" so in this case stemming may be a good choice. Might want to come back to
+this and try stemming but I'm conflicted since I know it can often hurt.
+
+I'm not sure how much this type of modeling told me about the text but I imagine
+if I had a huge corpus of text that covered a wide variety of topics then this 
+might be more informative. It definitely confirms my impression of Eminescu
+as being a very sentimental, romantic poet. Maybe a sentiment analysis would be
+a good idea for his works?
+
+This was a really fun exercise in topic modeling and I'm grateful to Julia Silge
+for her super informative blog!

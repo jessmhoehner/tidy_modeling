@@ -1,0 +1,384 @@
+---
+title: "The Game is Afoot & Poems of Mihai Eminescu"
+author: "Jessica Randall"
+date: "9/4/2020"
+output: html_document
+---
+
+This notebook follow's Julia Silge's topic modeling tutorial [video](https://youtu.be/evTuL-RcRpc)
+and [blog post](https://juliasilge.com/blog/sherlock-holmes-stm/) and expands on 
+it with an example of topic modeling using Mihai Eminescu's collection "Poems" in 
+the original Romanian. 
+
+Additional Resources:
+[Tidy Text Mining](https://www.tidytextmining.com/tidytext.html)
+[Supervised Machine Learning for Text Analysis in R](https://smltar.com)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+pacman::p_load("tidymodels", "tidyverse","gutenbergr", 
+               "tidytext", "stringr", "stm", "quanteda", "reshape2")
+
+sherlock_raw <- gutenberg_download(1661)
+```
+
+## data prep {-} 
+
+```{r prep, message=FALSE, echo=FALSE}
+
+sherlock <- sherlock_raw %>%
+  mutate(story = ifelse(str_detect(text, "ADVENTURE"), 
+                        text, 
+                        NA)) %>%
+  fill(story) %>%
+  filter(story != "THE ADVENTURES OF SHERLOCK HOLMES") %>%
+  mutate(story = factor(story, levels = unique(story)))
+
+tidy_sherlock <- sherlock %>%
+  mutate(line = row_number()) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stop_words) %>%
+  filter(word != "holmes")
+
+tidy_sherlock %>%
+  count(word, sort = TRUE)
+
+```
+
+## explore tf-idf {-}
+
+Which words are most important in each story?
+
+tf-idf: "identifies words that are important to a document in a collection of 
+documents; in this case."The statistic tf-idf is intended to measure how 
+important a word is to a document in a collection (or corpus) of documents, 
+for example, to one novel in a collection of novels or to one website in a 
+collection of websites.
+
+decreases the weight for commonly used words and increases the weight for words 
+that are not used very much in a collection of documents. This can be combined 
+with term frequency to calculate a term’s tf-idf (the two quantities 
+multiplied together), the frequency of a term adjusted for how rarely it is used."
+
+see : https://www.tidytextmining.com/tfidf.html
+
+```{r tf_idf, include=FALSE}
+
+tidy_sherlock %>%
+  count(story, word, sort = TRUE) %>%
+  bind_tf_idf(word, story, n) %>%
+  group_by(story) %>%
+  top_n(10) %>%
+  ungroup %>%
+  mutate(word = reorder(word, tf_idf)) %>%
+  ggplot(aes(word, tf_idf, fill = story)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~story, scales = "free") +
+  coord_flip()
+
+```
+
+## topic modeling implementation
+
+structural topic model, em algorithm, k will vary by document, 
+slightly computationally intensive
+
+on k :The most important user input in parametric topic models is the number of 
+topics. There is no right answer to the appropriate number of topics. More 
+topics will give more fine-grained representations of the data at the potential 
+cost of being less precisely estimated." - documentation for stm
+
+
+```{r quanteda, include=FALSE}
+
+# create dfm
+sherlock_dfm <- tidy_sherlock %>%
+  count(story, word, sort = TRUE) %>%
+  cast_dfm(story, word, n)
+
+# fit the model
+topic_mod <- stm(sherlock_dfm, K = 6, seed = 22310)
+
+summary(topic_mod)
+
+```
+
+## plot the beta matrix
+
+beta probs: Which words contribute the most to each topic?
+
+gamma probs: How much does each topic contribute to a given document?
+How likely is this document to belong to this topic?
+this is a really good example of a model that did a good job putting stories
+into topics topics are all very strongly associated with one topic, not always 
+common, this is likely because this data set is very small
+
+```{r plot include=FALSE}
+
+td_beta <- tidy(topic_mod)
+
+td_beta %>%
+  group_by(topic) %>%
+  top_n(10) %>%
+  ungroup %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = topic)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~topic, scales = "free") +
+  coord_flip()
+
+td_gamma <- tidy(topic_mod, matrix = "gamma",
+             document_names = rownames(sherlock_dfm))
+
+
+td_gamma %>%
+  ggplot(aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(show.legend = TRUE) +
+  facet_wrap(~topic, ncol = 3)
+
+```
+
+## trying on my own with Mihai Eminescu's "Poems"
+
+```{r load_jr}
+
+poezii_raw <- gutenberg_download(35323)
+
+```
+
+## data prep {-} 
+
+only taking first half of poems of the raw corpus for better visualization
+removed editors note, table of contents, 
+used poem titles,
+pulled out romanian stopwords, the word "poems", notes, numbers
+
+```{r prep_jr, message=FALSE, echo=FALSE}
+
+poezii <- poezii_raw[151:12887,] %>%
+  mutate(poem = ifelse(str_detect(text, "[:upper:]+$"), text, NA)) %>%
+  fill(poem) %>%
+  mutate(poem = factor(poem, levels = unique(poem)))
+
+stop_snow <- as.data.frame(stopwords("ro", source = "snowball")) %>%
+  rename(word = `stopwords("ro", source = "snowball")`)
+stop_nltk <- as.data.frame(stopwords("ro", source = "nltk")) %>%
+  rename(word = `stopwords("ro", source = "nltk")`)
+stop_iso <- as.data.frame(stopwords("ro", source = "stopwords-iso")) %>%
+  rename(word = `stopwords("ro", source = "stopwords-iso")`)
+numbers <- c("I", "	II", "III", "IV", "V", "VI", 
+             "VII", "VIII", "11", "1652","38", "5", "6", "9")
+
+stopwords_ro <- left_join(stop_iso, stop_nltk, by = "word") %>%
+  left_join(stop_snow, by = "word")
+
+tidy_poezii <- poezii %>%
+  mutate(line = row_number()) %>%
+  unnest_tokens(word, text) %>%
+  anti_join(stopwords_ro) %>%
+  filter(word != "poezii") %>%
+  filter(!word %in% numbers) %>%
+  filter(!poem %in% numbers) %>%
+  filter(poem != "NOTE")
+
+tidy_poezii %>%
+  count(word, sort = TRUE)
+
+```
+
+## explore tf-idf {-}
+
+Which words are most important?
+
+filtered words with tf_idf > 0.025 so that all words would show up 
+clearly on the graph
+
+```{r tf_idf_jr, include=FALSE}
+
+#include only first 15 poems in sample
+
+poezii_tf_idf <- tidy_poezii %>%
+  count(poem, word, sort = TRUE) %>%
+  arrange(poem, word, n) %>%
+  slice(1:2583) %>%
+  bind_tf_idf(word, poem, n) %>%
+  group_by(poem) %>%
+  top_n(5) %>%
+  ungroup %>%
+  mutate(word = reorder(word, tf_idf))
+
+poezii_tf_idf %>%
+  ggplot(aes(word, tf_idf, fill = poem)) +
+  geom_col(alpha = 0.8, show.legend = FALSE) +
+  facet_wrap(~poem, scales = "free", ncol = 3) +
+  coord_flip() +
+  theme(strip.text = element_text(size = 11)) +
+  labs(x = NULL, y = "tf-idf",
+         title = "Highest tf-idf words in 15 of Mihai Eminescu's Poems",
+         subtitle = "Individual poems focus on different themes and visual metaphors")
+
+```
+
+"The Grave of Aron Pumunul" lists the 5 most important words as "whispers", 
+"whispering", "extinguished", "follow", "field". 
+
+"A Ride at Dawn" lists the 5 most important words as "kiss", "gentle", "thin", 
+"cleave", and "wash". 
+
+"From Abroad" lists the 5 most important words as "date", "whispered", "native", 
+"groan", and "clouds".
+
+"In Bucovina" lists the 5 most important words as "Bucovina", "step", "hum", 
+"tremble", and "pass".
+
+"The Hope" lists the 5 most important words as "hope" "I want", "love", 
+"dearest", and "you want".
+
+"The Mysteries of the Night" lists the 5 most important words as "many", 
+"gentle"(diminutive), "sighing", "Cantu", and "two". 
+
+"What I Wish From You, Beloved Romania" lists the 5 most important words as 
+"Romania" "I wish", "for you", "glory", and "strength". 
+
+"The Heliad" lists the 5 most important words as "garland", "sylphs", "heliads", 
+"cloud", and "curls".
+
+"The Artist" lists the 5 most important words as "take", part of the word
+"coming true", "embodied", "flower", and "deify".
+
+"The Love of a Marble" lists the 5 most important words as "I love" "your", 
+"ocean", "love", and "tell".
+
+"Junii Corupti"* lists the 5 most important words as "forget", "dry", "death" 
+or "dying", "arise", and "strength". 
+
+"At the Death of Prince Stirbey" lists the 5 most important words as "move", 
+"Stirbey", "light", "to see", and "hearts". 
+
+"Venus and Madonna" lists the 5 most important words as "women", "lost",
+"Madonna", "saw", and "demon". 
+
+"The Epigones" lists the 5 most important words as "gold", "holy", "all", 
+"sense", and "death". 
+
+"Guardian Angel" lists the 5 most important words as "across", "you are", 
+"eyelashes", "keep watch", and "guard". 
+
+
+*the best translation of this title I can think of would be something like 
+"The Corrupted" but this loses the fact that he's speaking specifically about 
+young people, suggestions appreciated!
+
+## topic modeling implementation
+
+structural topic model, em algorithm, k will vary by document, 
+slightly computationally intensive
+
+on k :The most important user input in parametric topic models is the number of 
+topics. There is no right answer to the appropriate number of topics. More 
+topics will give more fine-grained representations of the data at the potential 
+cost of being less precisely estimated." - documentation for stm
+
+
+```{r quanteda, include=FALSE}
+
+# create dfm
+poezii_dfm <- tidy_poezii %>%
+  count(poem, word, sort = TRUE) %>%
+  cast_dfm(poem, word, n)
+
+# fit the model
+poezii_mod <- stm(poezii_dfm, K = 18, seed = 22310)
+
+summary(poezii_mod)
+```
+
+## plot the beta matrix
+
+beta probs: Which words contribute the most to each topic?
+
+gamma probs: How much does each topic contribute to a given document?
+How likely is this document to belong to this topic?
+this is a really good example of a model that did a good job putting stories
+into topics topics are all very strongly associated with one topic, not always 
+common, this is likely because this data set is very small
+
+```{r plot include=FALSE}
+
+td_beta_p <- tidy(poezii_mod)
+
+td_beta_p %>%
+  group_by(topic) %>%
+  top_n(10) %>%
+  ungroup %>%
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = topic)) +
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~topic, scales = "free") +
+  coord_flip() +
+  scale_x_reordered() +
+  labs(x = NULL, y = expression(beta),
+       title = "Highest word probabilities for each topic",
+       subtitle = "Different words are associated with different topics")
+
+td_gamma_p <- tidy(poezii_mod, matrix = "gamma",
+             document_names = rownames(poezii_dfm))
+
+td_gamma_p %>%
+  ggplot(aes(gamma, fill = as.factor(topic))) +
+  geom_histogram(show.legend = TRUE) +
+  facet_wrap(~topic, ncol = 3) +
+  labs(title = "Distribution of document probabilities for each topic",
+       subtitle = "Each topic is associated with 1-3 stories",
+       y = "Number of stories", x = expression(gamma))
+
+```
+
+The graph of beta probabilities suggests that there are 9 topics within 12 poems.
+This seems reasonable since we might expect that a poet would write at least a
+few poems with somewhat overlapping topics. 
+
+The first topic includes words largely from "The Corrupted" and this seems
+reasonable as the mood of this poem seems much darker than the rest of those 
+included in this sample. The second topic is largely comprised of words from 
+"What I Wish From You, Beloved Romania" and this was the only poem that seemed
+to be about Romania specifically. Interestingly this also includes the word
+"sweet" which we'll explore in other topics.
+
+The third topic is largely from "The Artist", the fourth from "Mysteries of the 
+Night", and the fifth topic is where we start to see overlapping words from a 
+few poems and in fact have three topics which rate the word "sweet" as most 
+important. 
+
+Each of the topics which rate "sweet" as most important seems to suggest a 
+different type of sweetness. The fifth topic rates words like "sweet", "gentle", 
+"forehead", "song", and "curls" as most important so it seems to be picking up 
+romantic sweetness. The sixth topic rates "sweet", "hope", "wish", "gold", 
+"forget" as most important so it seems to be picking up on the sense of the 
+sweetness of fulfilled dreams or wishes and upon closer examination many of these
+words are present in "The Hope". The ninth topic rates words like 
+"sweet", "love", "crying", "extinguished", "whispering", "whispers" so 
+it's picking up the bittersweetness likely present in many Eminescu poems.
+It likely comes as no surprise to those who are even passingly familiar with
+Eminescu's poetry that many of the topics are quite sentimental but this is a ver
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
